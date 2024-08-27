@@ -3,14 +3,14 @@ package exporter
 import (
 	"bytes"
 	"fmt"
-	io_prometheus_client "github.com/prometheus/client_model/go"
+	pcg "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"io"
 	"net/http"
 	"time"
 )
 
-func getNebulaMetrics(ipAddress string, port int32) (map[string]*io_prometheus_client.MetricFamily, error) {
+func getNebulaMetrics(ipAddress string, port int32) (map[string]*pcg.MetricFamily, error) {
 	httpClient := http.Client{
 		Timeout: time.Second * 2,
 	}
