@@ -173,25 +173,31 @@ func (e *NebulaExporter) CollectMetrics(
 					labelValues...,
 				)
 			case pcg.MetricType_SUMMARY:
+				quantiles := make(map[float64]float64)
 				for _, quantile := range m.GetSummary().Quantile {
-					ch <- prometheus.MustNewConstSummary(
-						desc,
-						m.GetSummary().GetSampleCount(),
-						m.GetSummary().GetSampleSum(),
-						map[float64]float64{quantile.GetQuantile(): quantile.GetValue()},
-						labelValues...,
-					)
+					quantiles[quantile.GetQuantile()] = quantile.GetValue()
 				}
+
+				ch <- prometheus.MustNewConstSummary(
+					desc,
+					m.GetSummary().GetSampleCount(),
+					m.GetSummary().GetSampleSum(),
+					quantiles,
+					labelValues...,
+				)
 			case pcg.MetricType_HISTOGRAM:
+				buckets := make(map[float64]uint64)
 				for _, bucket := range m.GetHistogram().Bucket {
-					ch <- prometheus.MustNewConstHistogram(
-						desc,
-						m.GetHistogram().GetSampleCount(),
-						m.GetHistogram().GetSampleSum(),
-						map[float64]uint64{bucket.GetUpperBound(): bucket.GetCumulativeCount()},
-						labelValues...,
-					)
+					buckets[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
 				}
+
+				ch <- prometheus.MustNewConstHistogram(
+					desc,
+					m.GetHistogram().GetSampleCount(),
+					m.GetHistogram().GetSampleSum(),
+					buckets,
+					labelValues...,
+				)
 			}
 
 		}
