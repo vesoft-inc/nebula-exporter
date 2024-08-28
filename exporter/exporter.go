@@ -3,9 +3,9 @@ package exporter
 import (
 	"context"
 	"fmt"
+	pcg "github.com/prometheus/client_model/go"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -108,62 +108,99 @@ func (e *NebulaExporter) CollectMetrics(
 	componentType string,
 	namespace string,
 	cluster string,
-	originMetrics []string,
+	metricFamilies map[string]*pcg.MetricFamily,
 	ch chan<- prometheus.Metric) {
-	if len(originMetrics) == 0 {
-		return
-	}
 
-	metrics := convertToMetrics(originMetrics)
-	for _, metric := range metrics {
-		v, err := strconv.ParseFloat(metric.Value, 64)
-		if err != nil {
-			continue
-		}
-
-		metricName := fmt.Sprintf("%s_%s_%s", FQNamespace, strings.ReplaceAll(componentType, "-", "_"), strings.ReplaceAll(metric.Name, ".", "_"))
-
-		if e.CollectPattern != nil {
-			if !e.CollectPattern.MatchString(metricName) {
-				continue
+	for _, mf := range metricFamilies {
+		for _, m := range mf.Metric {
+			if e.CollectPattern != nil {
+				if !e.CollectPattern.MatchString(mf.GetName()) {
+					continue
+				}
 			}
-		}
-		if e.IgnorePattern != nil {
-			if e.IgnorePattern.MatchString(metricName) {
-				continue
+			if e.IgnorePattern != nil {
+				if e.IgnorePattern.MatchString(mf.GetName()) {
+					continue
+				}
 			}
-		}
 
-		// TODO: uniform naming rules with _
-		labels := []string{"nebula_cluster", "componentType", "instanceName"}
-		labelValues := []string{cluster, componentType, instance.Name}
+			// TODO: uniform naming rules with _
+			labels := []string{"nebula_cluster", "componentType", "instanceName"}
+			labelValues := []string{cluster, componentType, instance.Name}
 
-		if namespace != NonNamespace {
-			labels = append(labels, "namespace")
-			labelValues = append(labelValues, namespace)
-		}
+			if namespace != NonNamespace {
+				labels = append(labels, "namespace")
+				labelValues = append(labelValues, namespace)
+			}
 
-		if namespace == NonNamespace {
-			labels = append(labels, "host")
-			labelValues = append(labelValues, instance.EndpointIP)
-		}
+			if namespace == NonNamespace {
+				labels = append(labels, "host")
+				labelValues = append(labelValues, instance.EndpointIP)
+			}
 
-		for key, value := range metric.Labels {
-			labels = append(labels, key)
-			labelValues = append(labelValues, value)
-		}
+			for _, label := range m.GetLabel() {
+				labels = append(labels, label.GetName())
+				labelValues = append(labelValues, label.GetValue())
+			}
 
-		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				metricName,
-				"",
+			desc := prometheus.NewDesc(
+				mf.GetName(),
+				mf.GetHelp(),
 				labels,
 				nil,
-			),
-			prometheus.GaugeValue,
-			v,
-			labelValues...,
-		)
+			)
+
+			switch mf.GetType() {
+			case pcg.MetricType_COUNTER:
+				ch <- prometheus.MustNewConstMetric(
+					desc,
+					prometheus.CounterValue,
+					m.GetCounter().GetValue(),
+					labelValues...,
+				)
+			case pcg.MetricType_GAUGE:
+				ch <- prometheus.MustNewConstMetric(
+					desc,
+					prometheus.GaugeValue,
+					m.GetGauge().GetValue(),
+					labelValues...,
+				)
+			case pcg.MetricType_UNTYPED:
+				ch <- prometheus.MustNewConstMetric(
+					desc,
+					prometheus.UntypedValue,
+					m.GetUntyped().GetValue(),
+					labelValues...,
+				)
+			case pcg.MetricType_SUMMARY:
+				quantiles := make(map[float64]float64)
+				for _, quantile := range m.GetSummary().Quantile {
+					quantiles[quantile.GetQuantile()] = quantile.GetValue()
+				}
+
+				ch <- prometheus.MustNewConstSummary(
+					desc,
+					m.GetSummary().GetSampleCount(),
+					m.GetSummary().GetSampleSum(),
+					quantiles,
+					labelValues...,
+				)
+			case pcg.MetricType_HISTOGRAM:
+				buckets := make(map[float64]uint64)
+				for _, bucket := range m.GetHistogram().Bucket {
+					buckets[bucket.GetUpperBound()] = bucket.GetCumulativeCount()
+				}
+
+				ch <- prometheus.MustNewConstHistogram(
+					desc,
+					m.GetHistogram().GetSampleCount(),
+					m.GetHistogram().GetSampleSum(),
+					buckets,
+					labelValues...,
+				)
+			}
+
+		}
 	}
 }
 
@@ -179,19 +216,7 @@ func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName stri
 		clusterName, strings.ToUpper(instance.ComponentType),
 		instance.Name, instance.EndpointPort)
 
-	wg.Add(2)
-	if instance.ComponentType == ComponentTypeStoraged {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			rocksDBStatus, err := getNebulaRocksDBStats(podIpAddress, podHttpPort)
-			if err != nil {
-				klog.Errorf("get query metrics from %s:%d failed: %v", podIpAddress, podHttpPort, err)
-				return
-			}
-			e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, rocksDBStatus, ch)
-		}()
-	}
+	wg.Add(1)
 
 	go func() {
 		defer wg.Done()
@@ -201,15 +226,6 @@ func (e *NebulaExporter) collect(wg *sync.WaitGroup, namespace, clusterName stri
 			return
 		}
 		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, metrics, ch)
-	}()
-
-	go func() {
-		defer wg.Done()
-		statusMetrics := "count=1"
-		if !isNebulaComponentRunning(podIpAddress, podHttpPort) {
-			statusMetrics = "count=0"
-		}
-		e.CollectMetrics(instance, instance.ComponentType, namespace, clusterName, []string{statusMetrics}, ch)
 	}()
 }
 
